@@ -1,11 +1,235 @@
-// imports
 import express from "express";
+import morgan from "morgan";
+import cors from "cors";
+import { listCourses } from "./dao.js"
+import { check, validationResult } from "express-validator";
+import passport from 'passport';
+import LocalStrategy from 'passport-local';
+import session from 'express-session';
+import dayjs from 'dayjs'
 
-// init express
-const app = new express();
+// init
+const app = express();
 const port = 3001;
 
-// activate the server
-app.listen(port, () => {
-  console.log(`Server listening at http://localhost:${port}`);
+// middlewares
+app.use(express.json());
+app.use(morgan("dev"));
+
+const corsOptions = {
+  origin: 'http://localhost:5173',
+  optionsSuccessState: 200,
+  credentials: true
+};
+app.use(cors(corsOptions))
+
+passport.use(new LocalStrategy(async function verify(username, password, cb) {
+  const user = await getUser(username, password);
+  
+  if(!user)
+    // null -> no error, invalid credetials, message
+    return cb(null, false, "Incorrect username or password."); // error message in the WWW-Authenticated header of the response
+    
+  return cb(null, user);
+}));
+
+passport.serializeUser(function (user, cb) {
+  cb(null, user);
 });
+
+passport.deserializeUser(function (user, cb) {
+  return cb(null, user);
+});
+
+// ! isLoggedIn
+const isLoggedIn = (req, res, next) => {
+  if(req.isAuthenticated()) {
+    return next();
+  }
+  console.log(req.user)
+  return res.status(401).json({error: "Not authorized"});
+}
+
+app.use(session({
+  secret: "shhhhh... it's a secret!",
+  resave: false,
+  saveUninitialized: false,
+}));
+app.use(passport.authenticate("session"));
+
+// -------- ROUTES --------
+
+/ * --- SESSION -- */
+
+// * POST /api/sessions
+app.post("/api/sessions", passport.authenticate("local"), function(req, res) {
+  return res.status(201).json(req.user);
+});
+
+// * GET /api/sessions/current -> user
+app.get("/api/sessions/current", (req, res) => {
+  if(req.isAuthenticated()) {
+    res.json(req.user);}
+  else
+    res.status(401).json({error: "Not authenticated"});
+});
+
+// * DELETE /api/session/current
+app.delete("/api/sessions/current", (req, res) => {
+  req.logout(() => {
+    res.end();
+  });
+});
+
+
+/ * --- COURSES -- */
+
+// * GET /api/courses
+app.get("/api/courses", async (req, res) => {
+  try {
+    const courses = await listCourses();
+    res.json(courses);
+  } catch (err) {
+    console.error("Errore nel recupero dei corsi:", err);
+    res.status(500).json({ error: "Errore interno del server durante il recupero dei corsi." });
+  }
+});
+
+app.listen(port, () => {console.log(`API server started at http://localhost:${port}`)});
+
+/** 
+
+// ****************************************************************
+
+// GET /api/questions
+app.get("/api/questions", (request, response) => {
+  listQuestions()
+    .then(questions => response.json(questions))
+    .catch(() => response.status(500).end());
+});
+
+// GET /api/questions/<id>
+app.get("/api/questions/:id", async (req, res) => {
+  try {
+    const question = await getQuestion(req.params.id);
+    if(question.error) {
+      res.status(404).json(question);
+    }
+    else res.json(question);
+  }
+  catch {
+    res.status(500).end();
+  }
+});
+
+// GET /api/questions/<id>/answers
+app.get("/api/questions/:id/answers", async (req, res) => {
+  try {
+    const answers = await getAnswers(req.params.id);
+    setTimeout(()=>res.json(answers), 1000);
+  } catch {
+    res.status(500).end();
+  }
+});
+
+// POST /api/questions/<id>/answers
+app.post("/api/questions/:id/answers", isLoggedIn, [
+  check("text").notEmpty()
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(422).json({errors: errors.array()});
+  }
+
+  // const newAnswer = req.body;
+  const newAnswer = {
+    text: req.body.text,
+    author: {
+      email: req.user.username,
+      id: req.user.id,
+    },
+    score: 0,
+    date: dayjs().format('YYYY-MM-DD')
+  }
+  // console.log(newAnswer)
+  const questionId = req.params.id;
+
+  try {
+    const id = await addAnswer(newAnswer, questionId);
+    res.status(201).location(id).end();
+  } catch(e) {
+    console.error(`ERROR: ${e.message}`);
+    res.status(503).json({error: "Impossible to create the answer."});
+  }
+});
+
+// PUT /api/answers/<id>
+app.put("/api/answers/:id", isLoggedIn, [
+  check("text").notEmpty()
+], async (req, res) => {
+  const errors = validationResult(req);
+  if (!errors.isEmpty()) {
+    return res.status(422).json({errors: errors.array()});
+  }
+
+  const answerToUpdate = {
+      text: req.body.text,
+      author: {
+        email: req.user.username,
+        id: req.user.id,
+      },
+    score: 0,
+    date: dayjs().format('YYYY-MM-DD')
+   }
+
+  answerToUpdate.id = req.params.id;
+
+  try {
+    await updateAnswer(answerToUpdate);
+    res.status(200).end();
+  } catch {
+    res.status(503).json({"error": `Impossible to update answer #${req.params.id}.`});
+  }
+});
+
+// DELETE /api/answers/<id>
+app.delete("/api/answers/:id", isLoggedIn, async (req, res) => {
+
+  // checking the correct authorization level
+  // id is present and is a valid answer (the DB will check)
+  // the owner of the answer is the currently logged in user -> answer.userid == req.user.id
+
+  try {
+    await deleteAnswer(req.params.id);
+    res.status(200).end();
+  } catch {
+    res.status(503).json({"error": `Impossible to delete answer #${req.params.id}.`});
+  }
+});
+
+
+
+app.use(isLoggedIn)
+// POST /api/answers/<id>/vote
+app.post("/api/answers/:id/vote",  [
+  check("vote").notEmpty()
+], async (req, res) => {
+  const errors = validationResult(req);
+  if(!errors.isEmpty()) {
+    res.status(422).json({errors: errors.array()});
+  }
+
+  const answerId = req.params.id;
+  try {
+    const num = await voteAnswer(answerId, req.body.vote);
+    if(num === 1)
+      res.status(204).end();
+    else
+      throw new Error(`Error in casting a vote for answer #${answerId}`);
+  }
+  catch(e) {
+    res.status(503).json({error: e.message});
+  }
+});
+
+*/
